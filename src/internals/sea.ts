@@ -48,18 +48,25 @@ export class SEA {
   }
 
   /**
+   * Encrypts plaintext using the public key `pub`.
+   * Returns in base64 format.
+   * @param data plaintext
+   * @param pub public key
+   */
+  static encryptForAddress(data: string, pub: string): string {
+    const encrypted = publicEncrypt(pub, Buffer.from(data, "utf-8"));
+    const base64 = encrypted.toString("base64");
+    return base64;
+  }
+
+  /**
    * Encrypts plaintext using the public key of `key`.
    * Returns in base64 format.
    * @param data plaintext
    * @param key Key pair
    */
-  static encrypt(data: string, key: Pair | string): string {
-    let pub: string;
-    if (typeof key == "string") pub = key;
-    else pub = key.pub;
-    const encrypted = publicEncrypt(pub, Buffer.from(data, "utf-8"));
-    const base64 = encrypted.toString("base64");
-    return base64;
+  static encrypt(data: string, key: Pair): string {
+    return this.encryptForAddress(data, key.pub);
   }
 
   /**
@@ -86,22 +93,33 @@ export class SEA {
   }
 
   /**
-   * Verifies a cryptographic signature from the public key of `key` or address.
+   * Verifies a cryptographic signature of a public key.
+   * @param pub Public key
    * @param data Signature in base64
-   * @param key Key pair
+   * @param expected Expected MAC
    */
-  static verify(data: string, key: Pair | string): string | false {
-    let pub: string;
-    if (typeof key == "string") pub = key;
-    else pub = key.pub;
-
+  static verifyViaAddress(
+    pub: string,
+    data: string,
+    expected: string
+  ): boolean {
     try {
       const mac = publicDecrypt(pub, Buffer.from(data, "base64"));
       const utf8 = mac.toString("utf-8");
-      return utf8;
+      return utf8 == expected;
     } catch (err) {
       return false;
     }
+  }
+
+  /**
+   * Verifies a cryptographic signature from the public key of `key` or address.
+   * @param key Key pair
+   * @param data Signature in base64
+   * @param expected Expected MAC
+   */
+  static verify(key: Pair, data: string, expected: string): boolean {
+    return this.verifyViaAddress(key.pub, data, expected);
   }
 
   /**
@@ -132,8 +150,9 @@ export class SEA {
    * @param path Path of the file
    * @param key Key pair
    */
-  static encryptFile(source: string, dest: string, key: Pair | string) {
+  static encryptFile(source: string, dest: string, pub: string) {
     const symmetric_key = randomBytes(16);
+
     throw new Error("Not yet implemented.");
   }
 
