@@ -1,4 +1,6 @@
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   generateKeyPair,
   privateDecrypt,
@@ -8,6 +10,18 @@ import {
   randomBytes,
   scrypt,
 } from "crypto";
+import {
+  createReadStream,
+  createWriteStream,
+  open,
+  promises as fs,
+  read,
+} from "fs";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import temp from "temp";
+import { v4 as uuid } from "uuid";
+import Multistream from "multistream";
 
 export interface Pair {
   pub: string;
@@ -147,21 +161,207 @@ export class SEA {
 
   /**
    * Encrypts `source` to `dest`
-   * @param path Path of the file
-   * @param key Key pair
+   * @param source Path of the file to be encrypted
+   * @param dest  Path of the output files
+   * @param from_key Key pair of the file owner
+   * @param to Public key of the file viewer
    */
-  static encryptFile(source: string, dest: string, pub: string) {
-    const symmetric_key = randomBytes(16);
+  static async encryptFile(
+    source: string,
+    dest: string,
+    from_key: Pair,
+    to: string
+  ) {
+    // [4 bytes - MAC length]
+    // [4 bytes - Key length]
+    // [MAC]
+    // [KEY]
+    // [CONTENT]
+    const dir = await this.requestTempDir();
+    const path_mac = `${dir}/mac.txt`;
+    const path_key = `${dir}/key.txt`;
+    const path_content = `${dir}/content.aes`;
 
-    throw new Error("Not yet implemented.");
+    // encrypt key
+    const key = randomBytes(16);
+    const iv = randomBytes(16);
+    const key_enc = this.encryptForAddress(
+      key.toString("utf-8") + ":" + iv.toString("utf-8"),
+      to
+    );
+    const key_bin = Buffer.from(key_enc, "base64");
+    const size_key = key_bin.byteLength;
+    await fs.writeFile(path_key, key_bin);
+
+    // encrypt file
+    await pipeline(
+      createReadStream(source),
+      createCipheriv("aes-128-cbc", key, iv),
+      createWriteStream(path_content)
+    );
+
+    // sign file
+    const hash = await this.hashFile(path_content);
+    const hash_utf8 = Buffer.from(hash, "base64").toString("utf-8");
+    const mac = this.sign(hash_utf8, from_key);
+    const mac_bin = Buffer.from(mac, "base64");
+    const size_mac = mac_bin.byteLength;
+    await fs.writeFile(path_mac, mac_bin);
+
+    // compile all
+    const stream = Multistream([
+      Readable.from(this.toInt32(size_mac)),
+      Readable.from(this.toInt32(size_key)),
+      createReadStream(path_mac),
+      createReadStream(path_key),
+      createReadStream(path_content),
+    ]);
+    await pipeline(stream, createWriteStream(dest));
+  }
+
+  // Request temporary file directory
+  private static requestTempDir() {
+    return new Promise<string>((resolve, reject) => {
+      const tmp_id = uuid();
+      temp.mkdir(tmp_id, (err, path) => {
+        if (err) return reject(err);
+        resolve(path);
+      });
+    });
+  }
+
+  /**
+   * Returns a 4-byte buffer from javascriptnumber
+   * @param num Javascript number
+   * @returns Int32
+   */
+  private static toInt32(num: number) {
+    // an Int32 takes 4 bytes
+    const arr = new ArrayBuffer(4);
+    const view = new DataView(arr);
+
+    // byteOffset = 0; litteEndian = false
+    view.setUint32(0, num, false);
+    return Buffer.from(arr);
+  }
+
+  /**
+   * Hash a file
+   * @param file File path to be hashed
+   * @returns SHA-256 hash in base64
+   */
+  static hashFile(file: string) {
+    return new Promise<string>((resolve, reject) => {
+      const hash = createHash("sha256");
+      hash.setEncoding("base64");
+      const input = createReadStream(file);
+      input.on("end", () => {
+        hash.end();
+        const base64 = hash.read();
+        resolve(base64);
+      });
+      input.pipe(hash);
+    });
   }
 
   /**
    * Decrypts a `source` to `dest`
-   * @param path Path of the file
-   * @param key Key pair
+   * @param source File to be decrypted
+   * @param dest Output file
+   * @param sender Public key of the sender
+   * @param receiver_key Key of the receiver
    */
-  static decryptFile(source: string, dest: string, key: Pair) {
-    throw new Error("Not yet implemented.");
+  static async decryptFile(
+    source: string,
+    dest: string,
+    sender: string,
+    receiver_key: Pair
+  ) {
+    // [4 bytes - MAC length]
+    // [4 bytes - Key length]
+    // [MAC]
+    // [KEY]
+    // [CONTENT]
+
+    const size_mac_buff = await this.readChunkFromFile(source, 0, 4);
+    const size_key_buff = await this.readChunkFromFile(source, 4, 8);
+
+    // Convert buffers to number
+    const size_mac = size_mac_buff.readInt32BE();
+    const size_key = size_key_buff.readInt32BE();
+
+    const dir = await this.requestTempDir();
+    const path_key = `${dir}/key.enc`;
+    const path_mac = `${dir}/mac.txt`;
+    const path_content = `${dir}/content.aes`;
+
+    // Isolate MAC
+    await pipeline(
+      createReadStream(source, {
+        start: 4 + 4,
+        end: 4 + 4 + size_mac - 1,
+      }),
+      createWriteStream(path_mac)
+    );
+    // Isolate Key
+    await pipeline(
+      createReadStream(source, {
+        start: 4 + 4 + size_mac,
+        end: 4 + 4 + size_mac + size_key - 1,
+      }),
+      createWriteStream(path_key)
+    );
+    // Isolate Content
+    await pipeline(
+      createReadStream(source, {
+        start: 4 + 4 + size_mac + size_key,
+      }),
+      createWriteStream(path_content)
+    );
+
+    //verify MAC
+    const mac = await fs.readFile(path_mac);
+    const mac_base64 = mac.toString("base64");
+    const hash = await this.hashFile(path_content);
+    const is_safe = await this.verifyViaAddress(sender, mac_base64, hash);
+    if (!is_safe) throw new Error("File integrity failed.");
+
+    //decrypt key
+    const key_enc = await fs.readFile(path_key);
+    const key_enc_base64 = key_enc.toString("base64");
+    const key_raw_utf8 = this.decrypt(key_enc_base64, receiver_key);
+    const [key_utf8, iv_utf8] = key_raw_utf8.split(":");
+    const [key, iv] = [
+      Buffer.from(key_utf8, "utf-8"),
+      Buffer.from(iv_utf8, "utf-8"),
+    ];
+
+    //decrypt file
+    await pipeline(
+      createReadStream(path_content),
+      createDecipheriv("aes-128-cbc", key, iv),
+      createWriteStream(dest)
+    );
+  }
+
+  /**
+   * Get a chunk of a file
+   * @param file File path
+   * @param start 0-index byte number
+   * @param end 0-index byte number. This byte is not included in the range
+   * @returns Buffer.
+   */
+  private static readChunkFromFile(file: string, start: number, end: number) {
+    return new Promise<Buffer>((resolve, reject) => {
+      open(file, "r", (err, fd) => {
+        if (err) return reject(err);
+        const size = end - start;
+        const buffer = Buffer.alloc(size);
+        read(fd, buffer, 0, size, start, (err, bytes, buff) => {
+          if (err) return reject(err);
+          resolve(buffer);
+        });
+      });
+    });
   }
 }
