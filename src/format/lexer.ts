@@ -6,7 +6,7 @@ export interface State {
 }
 
 export class Lexer {
-  lex(data: string) {
+  static lex(data: string) {
     const state: State = { section: "metadata", line: 0 };
     const tokens: Token[] = [];
 
@@ -37,14 +37,14 @@ export class Lexer {
     return tokens;
   }
 
-  private _updateState(
+  private static _updateState(
     tokens: Token[],
     data: string,
     state: State,
     token: Token
   ) {
     const new_data = data.substring(token.raw.length);
-    state.line += token.raw.match("\n")?.length ?? 0;
+    state.line += token.raw.split("\n").length;
     tokens.push(token);
     return new_data;
   }
