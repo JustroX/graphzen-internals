@@ -17,14 +17,14 @@ export interface Token<T = string> {
 }
 
 const rules: { [label: string]: RegExp } = {
-  SECTION_HEAD: /===\s*[a-zA-Z0-9]+\s*===/,
-  METADATA_ENTRY: /\s*[a-zA-Z0-9]+\s*=\s*[a-zA-Z0-9]\s*+/,
+  SECTION_HEAD: /^\s*===\s*[a-zA-Z0-9]+\s*===/,
+  METADATA_ENTRY: /^\s*[a-zA-Z0-9]+\s*=\s*[a-zA-Z0-9 ]+/,
   LIST_ITEM:
-    /^\s*[-*.]\s*[^\n\|]+(\s*\|(\s*[a-zA-Z0-9]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9]*)),?)+$)*/,
+    /^\s*[-*.]\s*[^\n\|]+(\s*\|(\s*[a-zA-Z0-9]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9]*))\s*,?)+\n*)*/,
   LIST_ITEM_TYPE: /^\s*[-*.]\s*/,
   LIST_ITEM_LABEL: /^[^\n\|]+/,
   LIST_ITEM_PROP_LINE:
-    /(\s*\|(\s*[a-zA-Z0-9]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9]*)),?)+$)*/,
+    /(\s*\|(\s*[a-zA-Z0-9]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9]*))\s*,?)+\n*)*/,
   LIST_ITEM_PROP_INLINE:
     /(\s*[a-zA-Z0-9\-]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9\-\_]*)),?)+/,
 };
@@ -35,7 +35,11 @@ export class Tokenizer {
     const cap = rules[TokenTypes.SECTION_HEAD].exec(stream);
     if (cap) {
       const raw = cap[0];
-      const label = raw.substring(3, raw.length - 3).trim();
+      const raw_trimmed = raw.trim();
+      const label = raw_trimmed
+        .substring(3, raw_trimmed.length - 3)
+        .trim()
+        .toLowerCase();
 
       if (label != "metadata" && label != "content" && label != "progress")
         throw new Error(`Unrecognized section named ${label}`);
@@ -88,6 +92,8 @@ export class Tokenizer {
     if (cap) {
       const raw = cap[0];
       let src = raw;
+
+      // Item Type
       const item_type = this.listType(src);
       if (!item_type)
         throw SyntaxError(`Can not determine item type at Line ${state.line}`);
@@ -96,13 +102,15 @@ export class Tokenizer {
         throw SyntaxError(
           `Unrecognized marker: ${marker} at Line ${state.line}`
         );
-
       src = src.substring(item_type.raw.length);
+
+      // Item Label
       const item_label = this.listLabel(src);
       if (!item_label)
         throw SyntaxError(`Can not determine item label at Line ${state.line}`);
       src = src.substring(item_label.raw.length);
 
+      // Props
       const props: { [key: string]: string } = {};
       const item_props = this.listLineProps(src, state);
 
@@ -149,56 +157,62 @@ export class Tokenizer {
     stream: string,
     state: State
   ): Token<{ [key: string]: string }> | undefined {
-    const cap = rules[TokenTypes.LIST_ITEM_PROP_LINE].exec(stream);
-    if (cap) {
-      const dic: { [key: string]: string } = {};
-      for (let line of cap) {
-        line = line.trim();
-        if (line[0] == "|") line = line.substring(1);
-        line = line.trim();
-        const token = this.listInlineProps(line);
-        if (!token)
-          throw SyntaxError(
-            `Can not determine item property at Line ${state.line}`
-          );
-        for (const k in token.value)
-          if (token.value.hasOwnProperty(k)) dic[k] = token.value[k];
-      }
+    const dic: { [key: string]: string } = {};
+    const raw = stream;
+    while (stream.length) {
+      const cap = rules[TokenTypes.LIST_ITEM_PROP_LINE].exec(stream);
+      if (!cap) throw new SyntaxError(`Unknown token at line ${state.line}`);
+      const raw = cap[0];
+      stream = stream.substring(raw.length);
 
-      return {
-        type: TokenTypes.LIST_ITEM_PROP_LINE,
-        raw: stream,
-        value: dic,
-      };
+      let line = raw.trim();
+      line = line.trim();
+      if (line[0] == "|") line = line.substring(1);
+      line = line.trim();
+
+      const token = this.listInlineProps(line, state);
+      if (!token) continue;
+      for (const k in token.value)
+        if (token.value.hasOwnProperty(k)) dic[k] = token.value[k];
     }
+
+    return {
+      type: TokenTypes.LIST_ITEM_PROP_LINE,
+      raw,
+      value: dic,
+    };
   }
 
   static listInlineProps(
-    stream: string
+    stream: string,
+    state: State
   ): Token<{ [key: string]: string }> | undefined {
-    const cap = rules[TokenTypes.LIST_ITEM_PROP_INLINE].exec(stream);
-    if (cap) {
-      const dic: { [key: string]: string } = {};
-      for (let _entry of cap) {
+    const dic: { [key: string]: string } = {};
+    const raw = stream;
+    while (stream.length) {
+      const cap = rules[TokenTypes.LIST_ITEM_PROP_INLINE].exec(stream);
+      if (!cap) throw new SyntaxError(`Unknown token at line ${state.line}`);
+      let _entry = cap[0];
+      stream = stream.substring(_entry.length);
+
+      _entry = _entry.trim();
+      if (_entry.at(-1) == ",") {
+        _entry = _entry.substring(0, _entry.length - 1);
         _entry = _entry.trim();
-        if (_entry.at(-1) == ",") {
-          _entry = _entry.substring(0, _entry.length - 1);
-          _entry = _entry.trim();
-        }
-
-        let [key, value] = _entry.split("=");
-        [key, value] = [key.trim(), value.trim()];
-
-        if (value[0] == "{" && value.at(-1) == "}")
-          value = value.substring(1, value.length - 1);
-        dic[key] = value;
       }
 
-      return {
-        raw: stream,
-        value: dic,
-        type: TokenTypes.LIST_ITEM_PROP_INLINE,
-      };
+      let [key, value] = _entry.split("=");
+      [key, value] = [key.trim(), value.trim()];
+
+      if (value[0] == "{" && value.at(-1) == "}")
+        value = value.substring(1, value.length - 1);
+      dic[key] = value;
     }
+
+    return {
+      raw,
+      value: dic,
+      type: TokenTypes.LIST_ITEM_PROP_INLINE,
+    };
   }
 }
