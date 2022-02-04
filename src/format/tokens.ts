@@ -1,6 +1,6 @@
 import { State } from "./lexer";
 
-enum TokenTypes {
+export enum TokenTypes {
   SECTION_HEAD = "SECTION_HEAD",
   METADATA_ENTRY = "METADATA_ENTRY",
   LIST_ITEM = "LIST_ITEM",
@@ -18,7 +18,7 @@ export interface Token<T = string> {
 
 const rules: { [label: string]: RegExp } = {
   SECTION_HEAD: /^\s*===\s*[a-zA-Z0-9]+\s*===/,
-  METADATA_ENTRY: /^\s*[a-zA-Z0-9]+\s*=\s*[a-zA-Z0-9 ]+/,
+  METADATA_ENTRY: /^\s*[a-zA-Z0-9]+\s*=\s*[^\s]+/,
   LIST_ITEM:
     /^\s*[-*.]\s*[^\n\|]+(\s*\|(\s*[a-zA-Z0-9]*\s*=\s*((\{[^\}]*})|([a-zA-Z0-9]*))\s*,?)+\n*)*/,
   LIST_ITEM_TYPE: /^\s*[-*.]\s*/,
@@ -82,7 +82,8 @@ export class Tokenizer {
     | Token<{
         label: string;
         indent: number;
-        item_type: "universal" | "existential" | "ordered";
+        sequence_type: "ordered" | "unordered";
+        progress_type: "universal" | "existential";
         props: { [key: string]: string };
       }>
     | undefined {
@@ -122,9 +123,10 @@ export class Tokenizer {
       return {
         type: TokenTypes.LIST_ITEM,
         value: {
-          item_type:
+          sequence_type: marker == "-" ? "ordered" : "unordered",
+          progress_type:
             marker == "-"
-              ? "ordered"
+              ? "universal"
               : marker == "*"
               ? "universal"
               : "existential",
